@@ -41,3 +41,52 @@ else
 	responseXML = responseXML + "<error>=><message>No Cases found with this Contact.</message></error>";
 }
 return responseXML;
+
+
+
+
+
+
+
+
+
+
+
+
+
+dealRecordResponse = zoho.crm.searchRecords("Deals","(boreal__General_Info:equals:" + generalInfoId + ")",1,1);
+dealRecord = dealRecordResponse.get(0);
+//Init final Response in XML
+responseXML = "";
+rowVal = 0;
+//Get 2nd Normal form records (Has Id, and Type from Deals - Stakeholders)
+stakeholdersDeal2nd = zoho.crm.getRelatedRecords("Stakeholders_Forms1","Deals",dealRecord.get("id"),1,100);
+if(stakeholdersDeal2nd.size() > 1)
+{
+    //Init record XML
+    responseXML = responseXML + "<record>";
+    for each  stakeholder2nd in stakeholdersDeal2nd
+    {
+        stakeholder1stId = stakeholder2nd.get("Stakeholders").get("id");
+        stakeholder2ndType = stakeholder2nd.get("Type");
+        //QUERY To get only specific fields of stakeholder un 1st normal Form
+        query_map = Map();
+        query_map.put("fields","boreal__First_Name,boreal__Last_Name");
+        stakeholder1stData = zoho.crm.getRecordById("boreal__Stakeholders_Forms",stakeholder1stId,query_map);
+        stakeholderFirstName = stakeholder1stData.get("boreal__First_Name");
+        stakeholderLastName = stakeholder1stData.get("boreal__Last_Name");
+        responseXML = responseXML + "<row cnt='" + rowVal + "'>";
+        responseXML = responseXML + "<FL val='id'>" + stakeholder1stId + "</FL>";
+        responseXML = responseXML + "<FL val='First Name'>" + ifNull(stakeholderFirstName, '') + "</FL>";
+        responseXML = responseXML + "<FL val='Last Name'>" + ifNull(stakeholderLastName, '') + "</FL>";
+        responseXML = responseXML + "<FL val='Type'>" + ifNull(stakeholder2ndType, '') + "</FL>";
+        responseXML = responseXML + "</row>";
+        rowVal = rowVal + 1;
+    }
+    responseXML = responseXML + "</record>";
+}
+else
+{
+    responseXML = responseXML + "<error>=><message>No Stakeholders found with this Deal.</message></error>";
+}
+return responseXML;
