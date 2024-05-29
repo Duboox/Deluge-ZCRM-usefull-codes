@@ -1,0 +1,43 @@
+query_map_stakeholder = Map();
+query_map_stakeholder.put("fields","id,boreal__Contact,boreal__Participant_Role_Individual,boreal__Participant_Role_Entity");
+// Get Account Participants records related to the contact
+stakeHolderIdsResponse = zoho.crm.searchRecords("boreal__Stakeholders_Forms","(boreal__Contact:equals:" + contactId + ")",1,200, query_map_stakeholder);
+
+cases = List();
+for each  stakeholder in stakeHolderIdsResponse
+	{
+		// Get Related list in Account participants
+		casesInfoResponse = zoho.crm.getRelatedRecords("Deals1", "boreal__Stakeholders_Forms", stakeholder.get("id"));
+		// Get First Element The related list of Cases in Accoount participants will always only have 1 Case
+		case = casesInfoResponse.get(0);
+		//case.put("boreal__Participant_Role_Entity", stakeholder.get("boreal__Participant_Role_Entity"));
+		//case.put("boreal__Participant_Role_Individual", stakeholder.get("boreal__Participant_Role_Individual"));
+		//info case;
+		cases.add(case); 
+	}
+
+//Init final Response in XML
+responseXML = "";
+rowVal = 0;
+if(cases.size() >= 1)
+{
+	//Init record XML
+	responseXML = responseXML + "<record>";
+	for each  case in cases
+	{
+		responseXML = responseXML + "<row cnt='" + rowVal + "'>";
+		responseXML = responseXML + "<FL val='id'>" + case.get('id') + "</FL>";
+		responseXML = responseXML + "<FL val='Case Name'>" + ifNull(case.get('Deal_Name'),'') + "</FL>";
+		responseXML = responseXML + "<FL val='Account title'>" + ifNull(case.get('boreal__Account_Title'),'') + "</FL>";
+		responseXML = responseXML + "<FL val='Role in Case'>" + ifNull(case.get('Type'), '') + "</FL>";
+		responseXML = responseXML + "<FL val='Stage'>" + case.get('Stage') + "</FL>";
+		responseXML = responseXML + "</row>";
+		rowVal = rowVal + 1;
+	}
+	responseXML = responseXML + "</record>";
+}
+else
+{
+	responseXML = responseXML + "<error>=><message>No Cases found with this Contact.</message></error>";
+}
+return responseXML;
