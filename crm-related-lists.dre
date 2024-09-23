@@ -24,8 +24,8 @@ if(cases.size() >= 1)
 	{
 		responseXML = responseXML + "<row cnt='" + rowVal + "'>";
 		responseXML = responseXML + "<FL val='id' link='true' url='https://crm.zoho.com/crm/org838686366/tab/Potentials/" + case.get('id') + "'>" + case.get('id') + "</FL>";
-		responseXML = responseXML + "<FL val='Case Name' link='true' url='https://crm.zoho.com/crm/org838686366/tab/Potentials/" + case.get('id') + "'>" + ifNull(case.get('Deal_Name'),'') + "</FL>";
-		responseXML = responseXML + "<FL val='Account title'>" + ifNull(case.get('boreal__Account_Title'),'') + "</FL>";
+		responseXML = responseXML + "<FL val='Case Name' link='true' url='https://crm.zoho.com/crm/org838686366/tab/Potentials/" + case.get('id') + "'>" + ifNull(xmlEncode(case.get('Deal_Name')),'') + "</FL>";
+		responseXML = responseXML + "<FL val='Account title'>" + ifNull(xmlEncode(case.get('boreal__Account_Title')),'') + "</FL>";
 		responseXML = responseXML + "<FL val='Role in Case'>" + ifNull(case.get('Participant_Role_In_Case'),'') + "</FL>";
 		responseXML = responseXML + "<FL val='Stage'>" + case.get('Stage') + "</FL>";
 		responseXML = responseXML + "</row>";
