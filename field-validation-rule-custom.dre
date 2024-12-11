@@ -1,0 +1,58 @@
+map validation_rule.ValidarRUT(String crmAPIRequest)
+{
+entityMap = crmAPIRequest.toMap().get("record");
+rut = entityMap.get("a3d__NroDoc");
+response = Map();
+if(rut.isNull())
+{
+	response.put('status','error');
+	response.put('message','Por favor ingrese el RUT.');
+	return response;
+}
+if(rut.length() < 7)
+{
+	response.put('status','error');
+	response.put('message','Ingresó un RUT muy corto, el RUT debe ser mayor a 7 Dígitos. Ej: xxxxxxx-x');
+	return response;
+}
+cleanRut = rut.replaceAll("[^0-9][^kK]","");
+if(cleanRut.length() < 6)
+{
+	response.put('status','error');
+	response.put('message','El RUT ingresado es inválido');
+	return response;
+}
+// Digito Validador
+dv = cleanRut.substring(rut.length() - 1,rut.length());
+rutSinDV = cleanRut.subString(0,rut.length() - 1);
+reverseRut = rutSinDV.reverse();
+// Calcular Dígito Verificador
+suma = 0;
+multiplo = 2;
+iterarRut = reverseRut.toList("");
+for each  numero in iterarRut
+{
+	iterador = multiplo * numero.toNumber();
+	suma = suma + iterador;
+	if(multiplo < 7)
+	{
+		multiplo = multiplo + 1;
+	}
+	else
+	{
+		multiplo = 2;
+	}
+}
+dvEsperado = 11 - suma % 11;
+dv = if(dv == "K" || dv == "k","10",dv);
+dv = if(dv == "0","11",dv);
+info dv;
+if(dvEsperado.toString() != dv)
+{
+	response.put('status','error');
+	response.put('message','El RUT ingresado es incorrecto.');
+	return response;
+}
+response.put('status','success');
+return response;
+}
