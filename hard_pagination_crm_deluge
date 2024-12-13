@@ -1,0 +1,23 @@
+try 
+{
+	// Get Zoho Products
+	PAGES_TO_LOOP = 20;
+	RECORDS_PER_PAGE = 200;
+	
+	products = Collection();
+	// Set Pagination Variables
+	iterationString = "".leftPad(PAGES_TO_LOOP).replaceAll(" ",",").toList().subList(0,PAGES_TO_LOOP);
+	for each index pageIndex in iterationString
+    {
+		PAGE = pageIndex + 1;
+		response = zoho.crm.getRecords("Products", PAGE, RECORDS_PER_PAGE, {"fields": "id,Product_Code"});
+		products.insertAll(response);
+		if (response.size() < RECORDS_PER_PAGE) {
+			break;
+		}
+  }
+	
+	info products;
+} catch (error) {
+	info error;
+}
