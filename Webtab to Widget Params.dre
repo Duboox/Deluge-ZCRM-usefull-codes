@@ -1,0 +1,9 @@
+https://plugin-a3d.zohosandbox.com/crm/tab/WebTab1?widgetparams=%7B%22AccountID%22%3A%22750923618%22%2C%22Entity%22%3A%22Contacts%22%2C%22EntityID%22%3A%22555888000004152011%22%7D
+
+
+** IN WIDGET
+
+  useEffect(() => {
+    ZOHO.embeddedApp.on("PageLoad", async (response) => {
+      //EXAMPLE WIDGET PARAMS: ?widgetparams=%7B"AccountID"%3A"750923618"%2C"Entity"%3A"Contacts"%2C"EntityID"%3A"555888000004152011"%7D
+      console.log('response', response)
