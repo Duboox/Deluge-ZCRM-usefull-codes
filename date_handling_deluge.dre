@@ -1,1 +1,5 @@
 test = "2024-12-16T21:23:42+00:00".toTime("yyyy-MM-dd'T'HH:mm:ss").toString("yyyy-MM-dd'T'HH:mm:ss") + "Z"
+
+
+//Get Current Date in UTC and format it in "2025-03-06T14:33:24Z"
+currentTimeUTC = zoho.currenttime.toString("yyyy-mm-dd'T'HH:mm:ss'Z'","UTC");
