@@ -1,0 +1,44 @@
+void automation.Test_JSON(string contactId)
+{
+	//Test => 5781195000021056001
+
+	// 1. Configuration
+	shopifyStore = "jmartinez-logoscorp.myshopify.com";
+	shopifyToken = "shpat_TOKEN_SHOPIFY"; // Scopes: write_themes, read_themes
+	shopifyThemeId = "170276946223";
+	assetNameShopify = "assets/crm_plans.json"; // Must start with 'assets/'
+
+	// 2. Get CRM Data
+	contactInfo = zoho.crm.getRecordById("Contacts", contactId);
+
+	// 3. Convert CRM Map to JSON String
+	contactJsonString = contactInfo.toString();
+	
+	// 4. Prepare Shopify API Payload
+	assetMap = Map();
+	assetMap.put("key", assetNameShopify);
+	assetMap.put("value", contactJsonString);
+	
+	payloadMap = Map();
+	payloadMap.put("asset", assetMap);
+	
+	// 5. Set API Headers
+	shopifyHeaders = Map();
+	shopifyHeaders.put("X-Shopify-Access-Token", shopifyToken);
+	shopifyHeaders.put("Content-Type", "application/json");
+	
+	// 6. Build API URL and Execute
+	apiUrl = "https://" + shopifyStore + "/admin/api/2023-10/themes/" + shopifyThemeId + "/assets.json";
+	
+	// Use PUT to create or overwrite the asset
+	response = invokeurl
+	[
+		url: apiUrl
+		type: PUT
+		parameters: payloadMap.toString()
+		headers: shopifyHeaders
+	];
+	
+	info "Shopify API Response:";
+	info response;
+}
