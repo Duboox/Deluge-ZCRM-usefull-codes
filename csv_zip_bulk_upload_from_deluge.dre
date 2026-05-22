@@ -1,0 +1,283 @@
+string standalone.dataprep_customers_bulk_write(String crmAPIRequest)
+{
+	// Get CRM Vars
+	crmVariables = zoho.crm.getOrgVariable("SCHEDULE_RR_DP").toMap();
+	readFunctionUrl = crmVariables.get("zcrm_Read_bulk_webhook");
+	targetRoleId = crmVariables.get("round_robin_rol_id");
+	// Get Args
+	arg = crmAPIRequest.toMap();
+	parameters = arg.get("params");
+	module = parameters.get("modulo_origen");
+	request_body = arg.getJSON("body");
+	org_id = crmAPIRequest.get("user_info").get("org_info").get("id").toString();
+	// Body from Callback
+	readResult = request_body.get("result");
+	downloadUrl = readResult.get("download_url");
+	moreRecords = readResult.get("more_records");
+	page = readResult.get("page");
+	readState = request_body.get("state");
+	nextPageToken = null;
+	// Logic Vars
+	organization_domain = "bancaribe.com.ve";
+
+
+	if(ifnull(moreRecords,"") != "" && moreRecords == true)
+	{
+		nextPageToken = readResult.get("next_page_token");
+		readParameters = Map();
+		readParameters.put("next_page_token",nextPageToken);
+		readParameters.put("page",page + 1);
+		readParameters.put("module",module);
+		nextPageResponse = invokeurl
+		[
+			url :readFunctionUrl
+			type :POST
+			parameters:readParameters.toString()
+		];
+		//info "Respuesta Página " + page + ":" + nextPageResponse;
+	}
+	if(readState != "COMPLETED")
+	{
+		return "Job Not completed";
+	}
+	// Download file
+	readResponse = invokeapi
+	[
+		service :zohocrm
+		path :downloadUrl
+		type :GET
+	];
+	// Check response is file
+	if(!readResponse.isFile())
+	{
+		info "Read Job Result isn't a file";
+		return "error";
+	}
+	// Get File Content
+	file = readResponse.extract();
+	data = "";
+	for each  fileObj in file
+	{
+		data = fileObj.getFileContent();
+	}
+	//info "data";
+	//info data;
+	// 1. Normalizar saltos de línea (asegura dividir correctamente las filas)
+	cleanData = data.toString().replaceAll("\\r\\n","|||").replaceAll("\\n","|||").replaceAll("\r\n","|||").replaceAll("\n","|||").replaceAll("\r","|||");
+	rows = cleanData.toList("|||");
+	//info "rows";
+	//info rows;
+	// 2. Inicializar la lista final
+	collectionData = List();
+	if(rows.size() <= 0)
+	{
+		return collectionData;
+	}
+	// 3. Obtener las cabeceras (primera fila)
+	headers = rows.get(0).toList(",");
+	//info "headers";
+	//info headers;
+	// 4. Iterar sobre las filas de datos
+	for each index rowIdx in rows
+	{
+		// IGNORAR la fila 0 (cabeceras)
+		if(rowIdx > 0)
+		{
+			currentRowString = rows.get(rowIdx);
+			// Evitar filas vacías al final del archivo
+			if(!currentRowString.isEmpty())
+			{
+				rowValues = currentRowString.toList(",");
+				rowMap = Map();
+				// 5. Emparejar cada valor con su cabecera
+				for each index colIdx in headers
+				{
+					headerName = headers.get(colIdx);
+					// Prevenir errores si una fila tiene menos columnas que las cabeceras
+					val = if(colIdx < rowValues.size(),rowValues.get(colIdx),"");
+					rowMap.put(headerName,val);
+				}
+				// Agregar el mapa a la colección
+				collectionData.add(rowMap);
+			}
+		}
+	}
+	// ************** Get CRM USERS *************
+	pages = {1,2,3,4,5};
+	crm_users = List();
+	for each  page in pages
+	{
+		crm_users_response = zoho.crm.getRecords("users",page,200,{"type":"ActiveUsers"});
+		responseMap = crm_users_response.toMap();
+		users = responseMap.get("users");
+		if(users != null && users.size() > 0)
+		{
+			filtered_users = List();
+			for each  user_r in users
+			{
+				roleObj = user_r.get("role");
+				if(roleObj != null && roleObj.get("id") == targetRoleId)
+				{
+					filtered_users.add(user_r);
+				}
+			}
+			crm_users.addAll(filtered_users);
+		}
+		infoMap = responseMap.get("info");
+		if(infoMap != null)
+		{
+			moreRecords = infoMap.get("more_records");
+			if(moreRecords == false)
+			{
+				break;
+			}
+		}
+	}
+	// ****************** ROUND ROBIN VARIABLES ******************
+	round_robin_index = zoho.currenttime.getMinutes() % crm_users.size();
+	// ****************** UPDATE ALL RECORDS TO NEW OWNER ******************
+	for each  record in collectionData
+	{
+		recordId = record.get("Id");
+		bc_responsible = record.get("BC_RESPONSABLE");
+		new_owner_id = "";
+		// ************* ASIGNACION POR BC RESPONSABLE *************
+		if(bc_responsible != "")
+		{
+			new_owner_email = bc_responsible.toLowerCase().trim() + "@" + organization_domain;
+			found_user_by_bc = null;
+			for each  crm_user in crm_users
+			{
+				email_crm_user = ifnull(crm_user.get("email"),"").toLowerCase().trim();
+				// Match exacto por correo electrónico
+				if(email_crm_user == new_owner_email)
+				{
+					found_user_by_bc = crm_user;
+					break;
+				}
+			}
+			if(found_user_by_bc != null)
+			{
+				new_owner_id = crm_user.get("id");
+			}
+			else
+			{
+				// Asignacion por round robin en caso de no encontrar el usuario
+				crm_user_by_round_robin = crm_users.get(round_robin_index);
+				new_owner_id = crm_user_by_round_robin.get("id");
+				// Update Round Robin Index
+				round_robin_index = (round_robin_index + 1) % crm_users.size();
+			}
+		}
+		else
+		{
+			// ************* ASIGNACION POR ROUND ROBIN *************
+			crm_user_by_round_robin = crm_users.get(round_robin_index);
+			new_owner_id = crm_user_by_round_robin.get("id");
+			// Update Round Robin Index
+			round_robin_index = (round_robin_index + 1) % crm_users.size();
+		}
+		//recordOwner = Map();
+		//recordOwner.put("id", new_owner_id);
+		record.put("Owner",new_owner_id);
+	}
+	// ********************* PARSE JSON AS CSV *********************
+	csv_content = "";
+	break_line = zoho.encryption.base64Decode("DQo=");
+	if(collectionData.size() > 0)
+	{
+		csv_headers = collectionData.get(0).keys();
+		header_string = "";
+		for each  head in csv_headers
+		{
+			header_string = if(header_string == "",head,header_string + "," + head);
+		}
+		csv_content = header_string + break_line;
+		for each  record in collectionData
+		{
+			row = "";
+			for each  header in csv_headers
+			{
+				value = record.get(header);
+				if(value == null)
+				{
+					value = "";
+				}
+				row = if(row == "",value,row + "," + value);
+			}
+			csv_content = csv_content + row + break_line;
+		}
+	}
+	// ********************* ADD CSV TO ZIP *********************
+	csv_file = csv_content.toFile("upload.csv");
+	// Compress file (.zip is added automaticlly)
+	zip_file = csv_file.compress("upload");
+	// ********************* UPLOAD ZIP FILE TO BULK WRITE *********************
+	uploadHeaders_map = Map();
+	uploadHeaders_map.put("feature","bulk-write");
+	uploadHeaders_map.put("X-CRM-ORG",org_id);
+	payload = Map();
+	payload.put("file", zip_file);
+
+	//https://webhook.site/60426a43-7b5d-4fb7-9850-e7cc415df512
+	//https://upload.zoho.com/crm/v8/upload
+	upload_file_response = invokeUrl
+	[
+	url :"https://upload.zoho.com/crm/v8/upload"
+	type :POST
+	body : payload
+	headers:uploadHeaders_map
+	connection: "zoho_crm_conn"
+    detailed: true
+	];
+	info "upload_file_response";
+	info upload_file_response;
+	
+	// ********************* CREATE BULK WRITE JOB *********************
+	resource_map = Map();
+	resource_map.put("type", "data");
+	resource_map.put("find_by", "id");
+
+	module_map = Map();
+	module_map.put("api_name", module);
+	resource_map.put("module", module_map);
+
+	resource_map.put("file_id", upload_file_response.get("responseText").get("details").get("file_id"));
+
+	resource_map.put("file_names", {"upload.zip"});
+
+	field_mappings = List();
+	field_mappings.add({"api_name": "id", "index": 0});
+	field_mappings.add({"api_name": "BC_RESPONSABLE", "index": 1});
+	field_mappings.add({"api_name": "CREATED_BY_API", "index": 2});
+	field_mappings.add({"api_name": "CRON_SUCCESS", "index": 3});
+	field_mappings.add({"api_name": "Owner", "index": 4, "find_by": "id"});
+	resource_map.put("field_mappings", field_mappings);
+
+	// Armar el payload final
+	resource_list = List();
+	resource_list.add(resource_map);
+
+	payload_write_job = Map();
+	payload_write_job.put("operation", "update");
+	payload_write_job.put("resource", resource_list);
+
+	info "payload_write_job";
+	info payload_write_job;
+
+	bulk_write_job_response = invokeapi
+	[
+		service :zohocrm
+		path :"/crm/bulk/v8/write"
+		type :POST
+		body:payload_write_job.toString()
+		headers:{"content-type":"application/json"}
+	];
+
+	info "bulk_write_job_response";
+	info bulk_write_job_response;
+
+	//return csv_content;
+	
+	return "";
+}
