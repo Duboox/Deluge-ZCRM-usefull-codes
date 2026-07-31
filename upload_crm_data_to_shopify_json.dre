@@ -42,3 +42,266 @@ void automation.Test_JSON(string contactId)
 	info "Shopify API Response:";
 	info response;
 }
+
+
+To handle "/n" on the parsing:
+// Normalize all physical line breaks to standard \n
+cr = zoho.encryption.urlDecode("%0D");
+nl = zoho.encryption.urlDecode("%0A");
+csvText = csvText.replaceAll(cr,"");
+raw_rows = csvText.toList(nl);
+
+
+
+
+****************************************** FULL EXAMPLE ******************************************
+response_map = Map();
+response_map.put("platform","Shopify");
+response_map.put("status","Pending");
+response_map.put("message","Initializing...");
+response_map.put("records_processed",0);
+SHOPIFY_CONFIG_API_NAME = "SHOPIFY_API_CONFIG";
+// ---------------------------------------------------------------------
+// 1. GET CONFIGURATION FROM ORG VARIABLES (JSON)
+// ---------------------------------------------------------------------
+config_str = zoho.crm.getOrgVariable(SHOPIFY_CONFIG_API_NAME);
+if(config_str == null || config_str == "")
+{
+	info "[SHOPIFY ERROR] Configuration variable not found or empty.";
+	response_map.put("status","Error");
+	response_map.put("message","Missing configuration variable (SHOPIFY_API_CONFIG).");
+	return response_map;
+}
+shopify_config = config_str.toMap();
+is_enabled = ifnull(shopify_config.get("enabled"),"false").toString().equalsIgnoreCase("true");
+if(!is_enabled)
+{
+	info "[SHOPIFY WORKER] Integration is disabled in config. Exiting gracefully.";
+	response_map.put("status","Disabled");
+	response_map.put("message","Integration is disabled in the configuration JSON.");
+	return response_map;
+}
+// Extract Credentials
+shopify_store_url = shopify_config.get("urlBase");
+shopify_token = shopify_config.get("accessToken");
+shopify_theme_id = shopify_config.get("themeId");
+if(shopify_store_url == null || shopify_token == null || shopify_theme_id == null)
+{
+	info "[SHOPIFY ERROR] Missing critical credentials in the JSON configuration.";
+	response_map.put("status","Error");
+	response_map.put("message","Missing critical credentials in configuration.");
+	return response_map;
+}
+// ---------------------------------------------------------------------
+// 2. EXTRACT DOWNLOAD URL FROM CRM BULK REQUEST
+// ---------------------------------------------------------------------
+info "[SHOPIFY SYNC] Extracting Bulk Read payload...";
+crmAPIRequestMap = crmAPIRequest.toMap();
+body_map = crmAPIRequestMap.get("body");
+if(body_map == null || !body_map.containKey("result"))
+{
+	info "[SHOPIFY ERROR] Invalid Bulk Read payload structure.";
+	response_map.put("status","Error");
+	response_map.put("message","Invalid webhook payload structure.");
+	return response_map;
+}
+downloadUrl = body_map.get("result").get("download_url");
+info "[SHOPIFY SYNC] Download URL retrieved: " + downloadUrl;
+// ---------------------------------------------------------------------
+// 3. DOWNLOAD & EXTRACT CSV FILE
+// ---------------------------------------------------------------------
+downloadUrlResponse = invokeapi
+[
+	service :zohocrm
+	path :downloadUrl
+	type :GET
+];
+unzippedFiles = downloadUrlResponse.extract();
+csvText = "";
+for each  fileObj in unzippedFiles
+{
+	csvText = fileObj.getFileContent();
+}
+if(csvText == "")
+{
+	info "[SHOPIFY ERROR] Downloaded CSV is empty or extraction failed.";
+	response_map.put("status","Error");
+	response_map.put("message","CSV is empty or extraction failed.");
+	return response_map;
+}
+// ---------------------------------------------------------------------
+// 4. ENTERPRISE CSV PARSER (MULTILINE ROW STITCHING & <br> INJECTION)
+// ---------------------------------------------------------------------
+info "[SHOPIFY SYNC] Parsing CSV and applying <br> to multiline captions...";
+// Normalize all physical line breaks to standard \n
+cr = zoho.encryption.urlDecode("%0D");
+nl = zoho.encryption.urlDecode("%0A");
+csvText = csvText.replaceAll(cr,"");
+raw_rows = csvText.toList(nl);
+//csvText = csvText.replaceAll("\r\n","\n").replaceAll("\r","\n");
+//raw_rows = csvText.toList("\n");
+final_rows = List();
+in_multiline = false;
+stitched_row = "";
+for each  r in raw_rows
+{
+	// Count how many quotes are in the string to track open/closed CSV enclosures
+	quote_count = r.length() - r.replaceAll("\"","").length();
+	if(!in_multiline)
+	{
+		if(quote_count % 2 != 0)
+		{
+			// Odd number of quotes means a multiline string has started
+			in_multiline = true;
+			stitched_row = r;
+		}
+		else
+		{
+			// Even number of quotes means it's a standard, single-line row
+			final_rows.add(r);
+		}
+	}
+	else
+	{
+		// We are inside a multiline string. 
+		// DIRECT OPTIMIZATION: Replace the physical line break with <br> immediately.
+		stitched_row = stitched_row + "<br>" + r;
+		if(quote_count % 2 != 0)
+		{
+			// Odd number of quotes closes the multiline string
+			in_multiline = false;
+			final_rows.add(stitched_row);
+			stitched_row = "";
+		}
+	}
+}
+// Failsafe if the CSV ended while still inside a multiline block
+if(in_multiline)
+{
+	final_rows.add(stitched_row);
+}
+// ---------------------------------------------------------------------
+// 5. EXTRACT HEADERS & MAP DATA TO JSON STRUCTURE
+// ---------------------------------------------------------------------
+// A. Extract and clean headers
+headers_raw = final_rows.get(0).toList(",");
+headers = List();
+for each  h in headers_raw
+{
+	headers.add(h.replaceAll("^\"|\"$","").replaceAll("\"\"","\"").trim());
+}
+// B. Process data rows
+jsonList = List();
+data_rows = final_rows.subList(1,final_rows.size());
+records_processed = 0;
+for each  row in data_rows
+{
+	if(row.trim() != "")
+	{
+		// Protect commas inside quotes during column split
+		raw_vals = row.toList(",");
+		final_vals = List();
+		in_col = false;
+		stitched_val = "";
+		for each  val in raw_vals
+		{
+			quote_count = val.length() - val.replaceAll("\"","").length();
+			if(!in_col)
+			{
+				if(quote_count % 2 != 0)
+				{
+					in_col = true;
+					stitched_val = val;
+				}
+				else
+				{
+					final_vals.add(val);
+				}
+			}
+			else
+			{
+				stitched_val = stitched_val + "," + val;
+				if(quote_count % 2 != 0)
+				{
+					in_col = false;
+					final_vals.add(stitched_val);
+					stitched_val = "";
+				}
+			}
+		}
+		if(in_col)
+		{
+			final_vals.add(stitched_val);
+		}
+		// C. Build the Map for this record
+		record_map = Map();
+		hIdx = 0;
+		for each  header_name in headers
+		{
+			cell_val = if(hIdx < final_vals.size(),final_vals.get(hIdx),"");
+			// Strip bounding quotes and fix escaped double quotes ("")
+			cell_val = cell_val.replaceAll("^\"|\"$","").replaceAll("\"\"","\"").trim();
+			record_map.put(header_name,cell_val);
+			hIdx = hIdx + 1;
+		}
+		jsonList.add(record_map);
+		records_processed = records_processed + 1;
+	}
+}
+info "[SHOPIFY SYNC] Total records parsed and mapped: " + records_processed;
+// Native Deluge Map-to-JSON serialization. 
+// Safe because all physical \n were converted to <br> above.
+json_payload = "[" + jsonList.toString() + "]";
+// ---------------------------------------------------------------------
+// 6. UPLOAD TO SHOPIFY ASSET API
+// ---------------------------------------------------------------------
+info "[SHOPIFY SYNC] Pushing JSON Asset to Shopify via Base64...";
+base64_payload = zoho.encryption.base64Encode(json_payload);
+assetNameShopify = "assets/publicidad_divulgada.json";
+assetMap = Map();
+assetMap.put("key",assetNameShopify);
+assetMap.put("attachment",base64_payload);
+payloadMap = Map();
+payloadMap.put("asset",assetMap);
+shopifyHeaders = Map();
+shopifyHeaders.put("X-Shopify-Access-Token",shopify_token);
+shopifyHeaders.put("Content-Type","application/json");
+// Ensure URL does not double slash if trailing slash exists
+if(shopify_store_url.endsWith("/"))
+{
+	shopify_store_url = shopify_store_url.substring(0,shopify_store_url.length() - 1);
+}
+apiUrl = shopify_store_url + "/themes/" + shopify_theme_id + "/assets.json";
+try 
+{
+	shopify_response = invokeurl
+	[
+		url :apiUrl
+		type :PUT
+		parameters:payloadMap.toString()
+		headers:shopifyHeaders
+		detailed:true
+	];
+	status_code = shopify_response.get("responseCode");
+	if(status_code == 200 || status_code == 201)
+	{
+		info "[SHOPIFY SYNC] SUCCESS. Asset updated correctly.";
+		response_map.put("status","Success");
+		response_map.put("message","Asset successfully uploaded to Shopify.");
+		response_map.put("records_processed",records_processed);
+	}
+	else
+	{
+		info "[SHOPIFY ERROR] Failed to update asset. Shopify Response: " + shopify_response;
+		response_map.put("status","Error");
+		response_map.put("message","Shopify API rejected the payload.");
+		response_map.put("shopify_error",shopify_response.get("responseText"));
+	}
+}
+catch (e_shopify)
+{
+	info "[SHOPIFY ERROR] Request failed entirely: " + e_shopify;
+	response_map.put("status","Error");
+	response_map.put("message","Request execution failed: " + e_shopify);
+}
+return response_map;
