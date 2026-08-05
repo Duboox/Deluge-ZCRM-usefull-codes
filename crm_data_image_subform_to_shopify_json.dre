@@ -1,0 +1,352 @@
+string button.sync_landings_shopify()
+{
+// =====================================================================================
+// WORKFLOW FUNCTION: BATCH SYNC PROMOTIONAL LANDINGS TO SHOPIFY
+// Module: Landings_Estaticos | Subform: Productos_Promocionales
+//
+// Description: Fetches up to 200 'Landings_Estaticos' records. Iterates through 
+// them using getRecordById to retrieve subforms ('Productos_Promocionales'). 
+// Downloads raw binary image streams via native invokeapi. Uploads images to 
+// Shopify Vault using HTTP PUT (3-Phase Staged Upload). Predicts CDN URLs, 
+// generates JSON manifests, deploys JSONs to Shopify Theme Assets, and updates CRM.
+// =====================================================================================
+
+// ---------------------------------------------------------------------
+// 0. UI RETURN MESSAGES (SPANISH)
+// ---------------------------------------------------------------------
+msg_err_config = "❌ Error: La configuración de Shopify (SHOPIFY_API_CONFIG) no existe o está vacía en las Variables de Organización.";
+msg_warn_no_records = "⚠️ No hay campañas configuradas en 'Landings Estáticos' para sincronizar.";
+msg_success = "✅ ¡Sincronización masiva finalizada exitosamente! Los JSON e imágenes están actualizados en Shopify.";
+
+info "--- [ENTERPRISE SYNC] INIT BATCH LANDINGS SYNC ---";
+
+// ---------------------------------------------------------------------
+// 1. SETUP & CONFIGURATION
+// ---------------------------------------------------------------------
+SHOPIFY_CONFIG_API_NAME = "SHOPIFY_API_CONFIG";
+shop_config_str = zoho.crm.getOrgVariable(SHOPIFY_CONFIG_API_NAME);
+
+if(shop_config_str == null || shop_config_str == "")
+{
+    info "[SYNC ERROR] Shopify configuration (Org Variable) missing.";
+    return msg_err_config;
+}
+
+shop_config = shop_config_str.toMap();
+shopify_token = shop_config.get("accessToken");
+shopify_url = shop_config.get("urlBase");
+raw_cdn_path = shop_config.get("cdnBasePath");
+shopify_theme_id = shop_config.get("themeId");
+
+// Sanitize GraphQL endpoint URL
+if(shopify_url.endsWith("/")) 
+{ 
+    shopify_url = shopify_url.substring(0, shopify_url.length() - 1); 
+}
+shopify_graphql_endpoint = shopify_url + "/graphql.json";
+
+// Sanitize CDN Base Path
+cdn_base_path = "";
+if(raw_cdn_path != null && raw_cdn_path.trim() != "")
+{
+    cdn_base_path = raw_cdn_path.trim();
+    if(cdn_base_path.startsWith("/")) { cdn_base_path = cdn_base_path.substring(1); }
+    if(cdn_base_path.endsWith("/")) { cdn_base_path = cdn_base_path.substring(0, cdn_base_path.length() - 1); }
+}
+
+// Utilities for text normalization (Handling \n and \r)
+cr = zoho.encryption.urlDecode("%0D");
+nl = zoho.encryption.urlDecode("%0A");
+
+// ---------------------------------------------------------------------
+// 2. FETCH ALL LANDING RECORDS (Limit 200 - Base Summary)
+// ---------------------------------------------------------------------
+info "[SYNC WORKER] Fetching Landings_Estaticos records summary...";
+landings_summary = zoho.crm.getRecords("Landings_Estaticos", 1, 200);
+
+if(landings_summary.size() == 0)
+{
+    info "[SYNC WARNING] No records found in Landings_Estaticos. Gracefully exiting.";
+    return msg_warn_no_records;
+}
+
+// ---------------------------------------------------------------------
+// 3. ITERATE RECORDS & FETCH FULL DATA (INCLUDING SUBFORMS)
+// ---------------------------------------------------------------------
+for each summary in landings_summary
+{
+    record_id = summary.get("id");
+    
+    // Fetch full record to include Subform data
+    landing = zoho.crm.getRecordById("Landings_Estaticos", record_id.toLong());
+    
+    landing_name = landing.get("Name");
+    json_filename = landing.get("Nombre_Archivo_JSON");
+    subform_rows = landing.get("Productos_Promocionales");
+    
+    info "[SYNC WORKER] Processing Landing: " + landing_name + " (ID: " + record_id + ")";
+
+    if(subform_rows == null || subform_rows.isEmpty())
+    {
+        info "[SYNC SKIP] Subform is empty for " + landing_name;
+        continue;
+    }
+
+    if(json_filename == null || json_filename == "")
+    {
+        info "[SYNC SKIP] Nombre_Archivo_JSON is empty for " + landing_name;
+        continue;
+    }
+
+    updated_subform = List();
+    needs_crm_update = false;
+    json_products = List();
+
+    // ---------------------------------------------------------------------
+    // 4. ITERATE SUBFORM ROWS & COMPARE IMAGES
+    // ---------------------------------------------------------------------
+    for each row in subform_rows
+    {
+        row_id = row.get("id");
+        image_field = row.get("Imagen"); // Returns a List of Maps
+        image_url = row.get("URL_Imagen_CDN");
+        title = row.get("Titulo");
+        
+        // Normalize Description
+        description = ifNull(row.get("Descripcion"), "");
+        description = description.replaceAll(cr, "");
+        
+        final_media_url = image_url; // Default to existing URL
+
+        if(image_field != null && !image_field.isEmpty())
+        {
+            image_data = image_field.get(0);
+            attachment_id = image_data.get("attachment_Id");
+            image_name = image_data.get("file_Name");
+
+            // Deduce MimeType based on file extension
+            file_parts = image_name.toList(".");
+            file_ext = "jpg"; // Safe fallback
+            if(file_parts.size() > 1) 
+            { 
+                file_ext = file_parts.get(file_parts.size() - 1).toLowerCase(); 
+            }
+            
+            mime_type = "image/jpeg";
+            if(file_ext == "png") { mime_type = "image/png"; }
+            else if(file_ext == "webp") { mime_type = "image/webp"; }
+            else if(file_ext == "gif") { mime_type = "image/gif"; }
+            else if(file_ext == "jpeg") { mime_type = "image/jpeg"; }
+            else if(file_ext == "svg") { mime_type = "image/svg+xml"; }
+            
+            if(file_ext == "jpeg") { file_ext = "jpg"; } // Shopify standardizes extension to jpg
+            
+            // Generate predictable unique filename using attachment_Id
+            clean_file_name = "pcm_promo_" + attachment_id + "." + file_ext;
+            predicted_cdn_url = "https://cdn.shopify.com/s/files/" + cdn_base_path + "/files/" + clean_file_name;
+
+            // Check if image changed or is missing
+            if(image_url == null || !image_url.contains(clean_file_name))
+            {
+                info "[SYNC WORKER] Image change detected for row ID: " + row_id + " (Attachment ID: " + attachment_id + ")";
+                
+                // 4.A Native Download via internal invokeapi (targeting subform row)
+                download_path = "/crm/v8/Productos_Promocionales/" + row_id + "/actions/download_fields_attachment?fields_attachment_id=" + attachment_id;
+                
+                raw_file = invokeapi 
+                [
+                    service: zohocrm
+                    path: download_path
+                    type: GET
+					connection: "zdeluge_crm"
+                ];
+
+                if(raw_file != null)
+                {
+                    // 4.B SHOPIFY PHASE 1: STAGED UPLOAD CREATE (HTTP PUT METHOD)
+                    info "[SYNC WORKER] Requesting Staged Upload credentials (PUT method) from Shopify...";
+                    staged_mutation = "mutation stagedUploadsCreate($input: [StagedUploadInput!]!) { stagedUploadsCreate(input: $input) { stagedTargets { url resourceUrl parameters { name value } } userErrors { message } } }";
+                    
+                    staged_input = Map();
+                    staged_input.put("filename", clean_file_name);
+                    staged_input.put("mimeType", mime_type);
+                    staged_input.put("resource", "IMAGE");
+                    staged_input.put("httpMethod", "PUT");
+                    
+                    staged_vars = Map();
+                    staged_vars.put("input", {staged_input});
+                    
+                    staged_payload = Map();
+                    staged_payload.put("query", staged_mutation);
+                    staged_payload.put("variables", staged_vars);
+                    
+                    staged_call = invokeurl 
+                    [
+                        url: shopify_graphql_endpoint
+                        type: POST
+                        parameters: staged_payload.toString()
+                        headers: {"X-Shopify-Access-Token": shopify_token, "Content-Type": "application/json"}
+                    ];
+                    
+                    staged_resp = staged_call.toMap();
+                    if(staged_resp.containKey("data") && staged_resp.get("data").containKey("stagedUploadsCreate"))
+                    {
+                        staged_data = staged_resp.get("data").get("stagedUploadsCreate");
+                        target_node = staged_data.get("stagedTargets").get(0);
+                        upload_url = target_node.get("url");
+                        resource_url = target_node.get("resourceUrl");
+                        
+                        // 4.C SHOPIFY PHASE 2: RAW BINARY TRANSFER (HTTP PUT)
+                        info "[SYNC WORKER] Transferring raw binary stream to Shopify Vault...";
+                        upload_call = invokeurl 
+                        [
+                            url: upload_url
+                            type: PUT
+                            body: raw_file
+                            headers: {"Content-Type": mime_type}
+                            detailed: true
+                        ];
+                        
+                        if(upload_call.get("responseCode") == 200 || upload_call.get("responseCode") == 201 || upload_call.get("responseCode") == 204)
+                        {
+                            // 4.D SHOPIFY PHASE 3: FILE CREATION & CDN URL PREDICTION
+                            info "[SYNC WORKER] Binary payload vaulted successfully. Registering file in Global CDN...";
+                            file_mutation = "mutation fileCreate($files: [FileCreateInput!]!) { fileCreate(files: $files) { userErrors { message } } }";
+                            
+                            file_input = Map();
+                            file_input.put("alt", "Promo " + title);
+                            file_input.put("filename", clean_file_name);
+                            file_input.put("contentType", "IMAGE");
+                            file_input.put("originalSource", resource_url);
+                            file_input.put("duplicateResolutionMode", "REPLACE");
+                            
+                            file_vars = Map();
+                            file_vars.put("files", {file_input});
+                            
+                            file_payload = Map();
+                            file_payload.put("query", file_mutation);
+                            file_payload.put("variables", file_vars);
+                            
+                            file_call = invokeurl 
+                            [
+                                url: shopify_graphql_endpoint
+                                type: POST
+                                parameters: file_payload.toString()
+                                headers: {"X-Shopify-Access-Token": shopify_token, "Content-Type": "application/json"}
+                                detailed: true
+                            ];
+                            
+                            if(file_call.get("responseCode") == 200)
+                            {
+                                // Predictive URL generation (Zero-Wait Architecture)
+                                cache_buster = zoho.currenttime.toLong();
+                                final_media_url = predicted_cdn_url + "?v=" + cache_buster;
+                                needs_crm_update = true;
+                                info "[SYNC WORKER] CDN Registration successful: " + final_media_url;
+                            }
+                            else 
+                            { 
+                                info "[SYNC ERROR] Failed to register file in Shopify GraphQL: " + file_call; 
+                            }
+                        }
+                        else 
+                        { 
+                            info "[SYNC ERROR] Failed to upload binary payload to Shopify Vault. HTTP Code: " + upload_call.get("responseCode"); 
+                        }
+                    }
+                    else 
+                    { 
+                        info "[SYNC ERROR] Shopify GraphQL Phase 1 (Staged Upload) failed: " + staged_resp; 
+                    }
+                }
+                else 
+                { 
+                    info "[SYNC ERROR] Failed to download binary file from CRM row via invokeapi: " + download_path; 
+                }
+            }
+            else 
+            { 
+                info "[SYNC WORKER] Image unchanged for row ID: " + row_id + ". Bypassing upload."; 
+            }
+        }
+
+        // Build JSON Product Node
+        prod_map = Map();
+        prod_map.put("titulo", title);
+        prod_map.put("descripcion", description);
+        prod_map.put("precio", row.get("Precio"));
+        prod_map.put("tipo_cta", row.get("Tipo_CTA"));
+        prod_map.put("enlace_cta", row.get("Enlace_CTA"));
+        prod_map.put("image_url", final_media_url);
+        
+        json_products.add(prod_map);
+
+        // Rebuild subform row for targeted CRM update
+        update_row = Map();
+        update_row.put("id", row_id);
+        update_row.put("URL_Imagen_CDN", final_media_url);
+        updated_subform.add(update_row);
+    }
+
+    // ---------------------------------------------------------------------
+    // 5. UPLOAD JSON ASSET TO SHOPIFY THEME
+    // ---------------------------------------------------------------------
+    info "[SYNC WORKER] Constructing and pushing JSON Asset for " + landing_name;
+    
+    asset_key = json_filename;
+    if(!asset_key.startsWith("assets/")) 
+    { 
+        asset_key = "assets/" + asset_key; 
+    }
+
+    payload_json = Map();
+    payload_json.put("campana", landing_name);
+    payload_json.put("actualizado_el", zoho.currenttime.toString("yyyy-MM-dd HH:mm:ss"));
+    payload_json.put("productos", json_products);
+
+    asset_map = Map();
+    asset_map.put("key", asset_key);
+    asset_map.put("value", payload_json.toString());
+    
+    theme_payload = Map();
+    theme_payload.put("asset", asset_map);
+    
+    apiUrl = shopify_url + "/themes/" + shopify_theme_id + "/assets.json";
+    
+    asset_resp = invokeurl 
+    [
+        url: apiUrl
+        type: PUT
+        parameters: theme_payload.toString()
+        headers: {"X-Shopify-Access-Token": shopify_token, "Content-Type": "application/json"}
+    ];
+    
+    if(asset_resp.get("asset") != null) 
+    { 
+        info "[SYNC WORKER] Asset JSON deployed successfully: " + asset_key; 
+    }
+    else 
+    { 
+        info "[SYNC ERROR] Asset deploy failed: " + asset_resp; 
+    }
+
+    // ---------------------------------------------------------------------
+    // 6. UPDATE CRM SUBFORM (IF CDN URLS CHANGED)
+    // ---------------------------------------------------------------------
+    if(needs_crm_update)
+    {
+        info "[SYNC WORKER] Updating Subform URLs in CRM for Landing Record ID: " + record_id;
+        update_map = Map();
+        update_map.put("Productos_Promocionales", updated_subform);
+        
+        update_res = zoho.crm.updateRecord("Landings_Estaticos", record_id.toLong(), update_map);
+        info "[SYNC WORKER] CRM Subform Update Response: " + update_res;
+    }
+}
+
+info "--- [ENTERPRISE SYNC] BATCH SYNC COMPLETED ---";
+
+return msg_success;
+
+
+}
